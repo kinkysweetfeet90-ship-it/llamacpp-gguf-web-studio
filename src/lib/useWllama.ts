@@ -77,7 +77,7 @@ export function useWllama(): WllamaEngine {
         );
         wllamaRef.current = wllama;
 
-        const totalBytes = files.reduce((s, f) => s + f.size, 0);
+        const totalBytes = files.reduce((s, f) => s + (f as File).size, 0);
         pushLog(
           'info',
           `[engine] loading ${files.length} GGUF file(s), total ${(totalBytes / 1024 ** 2).toFixed(1)} MB`,
@@ -86,21 +86,9 @@ export function useWllama(): WllamaEngine {
           `Reading ${files.length} GGUF shard${files.length > 1 ? 's' : ''} into memory…`,
         );
 
-        // Read files into ArrayBuffers to avoid async file read failures with large files
-        const fileBuffers: Blob[] = [];
-        for (let i = 0; i < files.length; i++) {
-          setLoadingPhase(
-            `Reading shard ${i + 1}/${files.length} into memory…`,
-          );
-          const buf = files[i];
-          const arrayBuffer = buf instanceof ArrayBuffer
-            ? buf
-            : buf instanceof Blob
-              ? await buf.arrayBuffer()
-              : await (buf as File).arrayBuffer();
-          // Wrap in Blob to ensure wllama's internal blob.slice().arrayBuffer() works
-          fileBuffers.push(new Blob([arrayBuffer]));
-        }
+        // Pass original File objects directly - wllama will write them to HeapFS
+        // in chunks via the synchronous file write path (not async blob.slice())
+        const fileBuffers = files as unknown as Blob[];
 
         setLoadingPhase(
           `Loading ${files.length} GGUF shard${files.length > 1 ? 's' : ''} into GPU…`,
