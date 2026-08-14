@@ -83,10 +83,24 @@ export function useWllama(): WllamaEngine {
           `[engine] loading ${files.length} GGUF file(s), total ${(totalBytes / 1024 ** 2).toFixed(1)} MB`,
         );
         setLoadingPhase(
-          `Loading ${files.length} GGUF shard${files.length > 1 ? 's' : ''} into memory…`,
+          `Reading ${files.length} GGUF shard${files.length > 1 ? 's' : ''} into memory…`,
         );
 
-        await wllama.loadModel(files as unknown as Blob[], {
+        // Read files into ArrayBuffers to avoid async file read failures with large files
+        const fileBuffers: ArrayBuffer[] = [];
+        for (let i = 0; i < files.length; i++) {
+          setLoadingPhase(
+            `Reading shard ${i + 1}/${files.length} into memory…`,
+          );
+          const arrayBuffer = await files[i].arrayBuffer();
+          fileBuffers.push(arrayBuffer);
+        }
+
+        setLoadingPhase(
+          `Loading ${files.length} GGUF shard${files.length > 1 ? 's' : ''} into GPU…`,
+        );
+
+        await wllama.loadModel(fileBuffers as unknown as Blob[], {
           n_ctx: settings.nCtx,
           ...(settings.nThreads > 0 ? { n_threads: settings.nThreads } : {}),
           n_gpu_layers: settings.nGpuLayers,
