@@ -7,7 +7,10 @@ export interface QuickModel {
   filename: string;
   size: string;
   url: string;
+  fallbackUrl?: string;
 }
+
+const abortControllers: Record<string, AbortController> = {};
 
 export const QUICK_MODELS: QuickModel[] = [
   {
@@ -39,11 +42,11 @@ export const QUICK_MODELS: QuickModel[] = [
     url: 'https://huggingface.co/Qwen/Qwen1.5-0.5B-Chat-GGUF/resolve/main/qwen1.5-0.5b-chat-q4_k_m.gguf',
   },
   {
-    id: 'minicpm-2b-q4_k_m',
-    name: 'MiniCPM 2B',
-    filename: 'minicpm-2b.Q4_K_M.gguf',
-    size: '480 MB',
-    url: 'https://huggingface.co/QuantFactory/MiniCPM-2B-GGUF/resolve/main/minicpm-2b.Q4_K_M.gguf',
+    id: 'phi3-mini-4k-q4_k_m',
+    name: 'Phi-3 Mini 4K',
+    filename: 'phi3-mini-4k-instruct-q4_k_m.gguf',
+    size: '240 MB',
+    url: 'https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/phi3-mini-4k-instruct-q4_k_m.gguf',
   },
 ];
 
@@ -56,10 +59,31 @@ export default function QuickDownloadSection({ onFileDownload, disabled }: Quick
   const [downloading, setDownloading] = useState<Record<string, { progress: number; error: string | null }>>({});
 
   const handleDownload = useCallback(async (model: QuickModel) => {
+    const attemptDownload = async (url: string) => {
+      const controller = new AbortController();
+      abortControllers[model.id] = controller;
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) {
+        if (response.status === 401 && model.fallbackUrl) {
+          throw { useFallback: true };
+        }
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      return response;
+    };
+
     setDownloading((prev) => ({ ...prev, [model.id]: { progress: 0, error: null } }));
     try {
-      const response = await fetch(model.url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      let response;
+      try {
+        response = await attemptDownload(model.url);
+      } catch (fallbackErr) {
+        if (fallbackErr && fallbackErr.useFallback && model.fallbackUrl) {
+          response = await attemptDownload(model.fallbackUrl);
+        } else {
+          throw fallbackErr;
+        }
+      }
       const contentLength = response.headers.get('Content-Length');
       const total = contentLength ? parseInt(contentLength, 10) : 0;
       const reader = response.body?.getReader();
@@ -85,12 +109,34 @@ export default function QuickDownloadSection({ onFileDownload, disabled }: Quick
           return updated;
         });
       }, 1000);
+      delete abortControllers[model.id];
       onFileDownload(file);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setDownloading((prev) => ({ ...prev, [model.id]: { progress: 0, error: msg } }));
+      if (msg.includes('aborted')) {
+        setDownloading((prev) => {
+          const updated = { ...prev };
+          delete updated[model.id];
+          return updated;
+        });
+      } else {
+        setDownloading((prev) => ({ ...prev, [model.id]: { progress: 0, error: msg } }));
+      }
     }
   }, [onFileDownload]);
+
+  const handleCancel = useCallback((model: QuickModel) => {
+    const controller = abortControllers[model.id];
+    if (controller) {
+      controller.abort();
+      delete abortControllers[model.id];
+    }
+    setDownloading((prev) => {
+      const updated = { ...prev };
+      delete updated[model.id];
+      return updated;
+    });
+  }, []);
 
   return (
     <section>
@@ -110,16 +156,33 @@ export default function QuickDownloadSection({ onFileDownload, disabled }: Quick
                   <div className="mt-1 text-[10px] text-red-400">{dlState.error}</div>
                 )}
               </div>
-              <button
-                onClick={() => handleDownload(model)}
-                disabled={disabled || isDownloading}
-                className={cn(
-                  'shrink-0 rounded-md px-2.5 py-1 text-[10px] font-semibold transition-colors',
-                  isDownloading ? 'cursor-wait bg-zinc-800 text-zinc-500' : 'bg-emerald-500 text-zinc-950 hover:bg-emerald-400',
-                )}
-              >
-                {isDownloading && dlState.progress < 100 ? `${Math.round(dlState.progress)}%` : isDownloading && dlState.error ? 'Retry' : 'Download'}
-              </button>
+              {isDownloading && dlState.progress < 100 ? (
+                <button
+                  onClick={() => handleCancel(model)}
+                  className="shrink-0 rounded-md px-2.5 py-1 text-[10px] font-semibold bg-red-500 text-white hover:bg-red-400"
+                >
+                  CANCEL
+                </button>
+              ) : isDownloading && dlState.error ? (
+                <button
+                  onClick={() => handleDownload(model)}
+                  disabled={disabled}
+                  className={cn('shrink-0 rounded-md px-2.5 py-1 text-[10px] font-semibold', 'bg-emerald-500 text-zinc-950 hover:bg-emerald-400')}
+                >
+                  Retry
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleDownload(model)}
+                  disabled={disabled}
+                  className={cn(
+                    'shrink-0 rounded-md px-2.5 py-1 text-[10px] font-semibold transition-colors',
+                    isDownloading ? 'cursor-wait bg-zinc-800 text-zinc-500' : 'bg-emerald-500 text-zinc-950 hover:bg-emerald-400',
+                  )}
+                >
+                  Download
+                </button>
+              )}
             </div>
           );
         })}
