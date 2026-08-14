@@ -153,40 +153,109 @@ export function useWllama(): WllamaEngine {
           `Loading ${files.length} GGUF shard${files.length > 1 ? 's' : ''} into GPU…`,
         );
 
-        await wllama.loadModel(fileBuffers as unknown as Blob[], {
-          n_ctx: settings.nCtx,
-          ...(settings.nThreads > 0 ? { n_threads: settings.nThreads } : {}),
-          n_gpu_layers: settings.nGpuLayers,
-          flash_attn: settings.flashAttn,
-        }).catch(async (loadErr: any) => {
-          const errMsg = loadErr?.message || String(loadErr);
+        // Attempt to load the model, with automatic retry on memory allocation errors
+        const loadAttempt = async (wllama: Wllama, loadOpts: LoadSettings) => {
+          await wllama.loadModel(fileBuffers as unknown as Blob[], {
+            n_ctx: loadOpts.nCtx,
+            ...(loadOpts.nThreads > 0 ? { n_threads: loadOpts.nThreads } : {}),
+            n_gpu_layers: loadOpts.nGpuLayers,
+            flash_attn: loadOpts.flashAttn,
+          });
+        };
+
+        try {
+          await loadAttempt(wllama, settings);
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
           const isMemError =
             errMsg.includes('could not allocate memory') ||
             errMsg.includes('RangeError') ||
             errMsg.includes('NotReadableError');
-          if (isMemError && settings.nGpuLayers > 0 && !settings.disableGpuRetry) {
-            pushLog('warn', `[engine] memory error with ${settings.nGpuLayers} GPU layers, retrying CPU-only (n_gpu_layers=0)`);
-            setError(null); // clear error
-            // Retry with no GPU offload — reduces memory pressure
-            await wllama.loadModel(fileBuffers as unknown as Blob[], {
-              n_ctx: settings.nCtx,
-              ...(settings.nThreads > 0 ? { n_threads: settings.nThreads } : {}),
-              n_gpu_layers: 0,
-              flash_attn: false,
-            });
-          } else if (isMemError) {
-            // Already CPU-only, try with reduced context window
-            pushLog('warn', `[engine] memory error even with CPU-only, trying reduced n_ctx`);
-            await wllama.loadModel(fileBuffers as unknown as Blob[], {
-              n_ctx: Math.min(settings.nCtx, 512),
-              ...(settings.nThreads > 0 ? { n_threads: settings.nThreads } : {}),
-              n_gpu_layers: 0,
-              flash_attn: false,
-            });
+
+          if (isMemError) {
+            // Tear down the failed instance and try again with reduced settings
+            await wllama.exit().catch(() => undefined);
+            wllamaRef.current = null;
+
+            // Retry 1: CPU-only mode (no GPU layers)
+            if (settings.nGpuLayers > 0) {
+              pushLog('warn', `[engine] memory error with ${settings.nGpuLayers} GPU layers, retrying CPU-only (n_gpu_layers=0)`);
+              setLoadingPhase('Loading model CPU-only (reduced memory)…');
+
+              const retryWllama = new Wllama(
+                { default: wllamaWasmUrl },
+                {
+                  suppressNativeLog: false,
+                  logger: {
+                    debug: (...a: unknown[]) => pushLog('debug', ...a),
+                    log: (...a: unknown[]) => pushLog('info', ...a),
+                    warn: (...a: unknown[]) => pushLog('warn', ...a),
+                    error: (...a: unknown[]) => pushLog('error', ...a),
+                  },
+                },
+              );
+              wllamaRef.current = retryWllama;
+
+              try {
+                await loadAttempt(retryWllama, { ...settings, nGpuLayers: 0, flashAttn: false });
+              } catch (retryErr) {
+                const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+                const isStillMemError =
+                  retryMsg.includes('could not allocate memory') ||
+                  retryMsg.includes('RangeError');
+
+                if (isStillMemError) {
+                  // Retry 2: Reduced context window (512 tokens)
+                  pushLog('warn', `[engine] still failing with CPU-only, trying reduced n_ctx=512`);
+                  setLoadingPhase('Loading with reduced context (512 tokens)…');
+
+                  await retryWllama.exit().catch(() => undefined);
+                  wllamaRef.current = null;
+
+                  const retry2Wllama = new Wllama(
+                    { default: wllamaWasmUrl },
+                    {
+                      suppressNativeLog: false,
+                      logger: {
+                        debug: (...a: unknown[]) => pushLog('debug', ...a),
+                        log: (...a: unknown[]) => pushLog('info', ...a),
+                        warn: (...a: unknown[]) => pushLog('warn', ...a),
+                        error: (...a: unknown[]) => pushLog('error', ...a),
+                      },
+                    },
+                  );
+                  wllamaRef.current = retry2Wllama;
+
+                  await loadAttempt(retry2Wllama, { ...settings, nGpuLayers: 0, flashAttn: false, nCtx: 512 });
+                } else {
+                  throw retryErr;
+                }
+              }
+            } else {
+              // Already CPU-only, try reduced context window
+              pushLog('warn', `[engine] memory error with CPU-only, trying reduced n_ctx=512`);
+              setLoadingPhase('Loading with reduced context (512 tokens)…');
+
+              const retryWllama = new Wllama(
+                { default: wllamaWasmUrl },
+                {
+                  suppressNativeLog: false,
+                  logger: {
+                    debug: (...a: unknown[]) => pushLog('debug', ...a),
+                    log: (...a: unknown[]) => pushLog('info', ...a),
+                    warn: (...a: unknown[]) => pushLog('warn', ...a),
+                    error: (...a: unknown[]) => pushLog('error', ...a),
+                  },
+                },
+              );
+              wllamaRef.current = retryWllama;
+
+              await loadAttempt(retryWllama, { ...settings, nCtx: 512 });
+            }
           } else {
-            throw loadErr;
+            throw e;
           }
-        });
+        }
 
         setLoadingPhase('Reading model metadata…');
         const meta = wllama.getModelMetadata();
