@@ -86,9 +86,68 @@ export function useWllama(): WllamaEngine {
           `Reading ${files.length} GGUF shard${files.length > 1 ? 's' : ''} into memory…`,
         );
 
-        // Pass original File objects directly - wllama will write them to HeapFS
-        // in chunks via the synchronous file write path (not async blob.slice())
-        const fileBuffers = files as unknown as Blob[];
+        // Pre-read files into ArrayBuffers to bypass wllama's async blob.slice().arrayBuffer()
+        // which fails with NotReadableError on large GGUF files (>~1GB).
+        // We create custom blob-like objects that store data in memory and handle
+        // slice().arrayBuffer() and stream() reliably.
+        const fileBuffers: Blob[] = [];
+        for (let i = 0; i < files.length; i++) {
+          setLoadingPhase(
+            `Reading shard ${i + 1}/${files.length} into memory…`,
+          );
+          const arrayBuffer = await (files[i] as File).arrayBuffer();
+          const name = files[i].name;
+          const uint8 = new Uint8Array(arrayBuffer);
+          // Create a proper streaming reader for the fileWrite path
+          const makeStream = () => {
+            const CHUNK = 16 * 1024 * 1024; // 16MB chunks
+            let offset = 0;
+            return {
+              getReader: () => ({
+                read: () => {
+                  if (offset >= arrayBuffer.byteLength) {
+                    return { done: true, value: undefined };
+                  }
+                  const end = Math.min(offset + CHUNK, arrayBuffer.byteLength);
+                  const chunk = uint8.subarray(offset, end);
+                  offset = end;
+                  return { done: false, value: chunk };
+                },
+                releaseLock: () => {},
+                closed: Promise.resolve(),
+                cancel: () => Promise.resolve(),
+              }),
+              [Symbol.asyncIterator]: async function* () {
+                let offset = 0;
+                while (offset < arrayBuffer.byteLength) {
+                  const end = Math.min(offset + CHUNK, arrayBuffer.byteLength);
+                  yield uint8.subarray(offset, end);
+                  offset = end;
+                }
+              },
+            };
+          };
+          const blobLike: any = {
+            size: arrayBuffer.byteLength,
+            type: 'application/octet-stream',
+            name: name,
+            slice: (start: number, end: number) => {
+              const sub = arrayBuffer.slice(start, end);
+              return {
+                size: sub.byteLength,
+                type: 'application/octet-stream',
+                arrayBuffer: () => Promise.resolve(sub),
+                slice: (s: number, e: number) => blobLike.slice(start + s, start + e),
+                stream: makeStream,
+                text: () => new TextDecoder().decode(new Uint8Array(sub)),
+              };
+            },
+            arrayBuffer: () => Promise.resolve(arrayBuffer),
+            stream: makeStream,
+            text: () => new TextDecoder().decode(uint8),
+          };
+          fileBuffers.push(blobLike as unknown as Blob);
+        }
 
         setLoadingPhase(
           `Loading ${files.length} GGUF shard${files.length > 1 ? 's' : ''} into GPU…`,
