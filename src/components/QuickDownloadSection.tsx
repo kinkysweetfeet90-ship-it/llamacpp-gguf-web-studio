@@ -53,9 +53,7 @@ interface QuickDownloadProps {
 }
 
 export default function QuickDownloadSection({ onFileDownload, disabled }: QuickDownloadProps) {
-  const [downloading, setDownloading] = useState<Record<string, { progress: number; error: string | null }>>(
-    Object.fromEntries(QUICK_MODELS.map((m) => [m.id, { progress: 0, error: null }]))
-  );
+  const [downloading, setDownloading] = useState<Record<string, { progress: number; error: string | null }>>({});
 
   const handleDownload = useCallback(async (model: QuickModel) => {
     setDownloading((prev) => ({ ...prev, [model.id]: { progress: 0, error: null } }));
