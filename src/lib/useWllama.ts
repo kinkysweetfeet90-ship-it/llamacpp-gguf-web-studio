@@ -87,13 +87,19 @@ export function useWllama(): WllamaEngine {
         );
 
         // Read files into ArrayBuffers to avoid async file read failures with large files
-        const fileBuffers: ArrayBuffer[] = [];
+        const fileBuffers: Blob[] = [];
         for (let i = 0; i < files.length; i++) {
           setLoadingPhase(
             `Reading shard ${i + 1}/${files.length} into memory…`,
           );
-          const arrayBuffer = await files[i].arrayBuffer();
-          fileBuffers.push(arrayBuffer);
+          const buf = files[i];
+          const arrayBuffer = buf instanceof ArrayBuffer
+            ? buf
+            : buf instanceof Blob
+              ? await buf.arrayBuffer()
+              : await (buf as File).arrayBuffer();
+          // Wrap in Blob to ensure wllama's internal blob.slice().arrayBuffer() works
+          fileBuffers.push(new Blob([arrayBuffer]));
         }
 
         setLoadingPhase(
